@@ -6,10 +6,15 @@ const app = express();
 app.use('/', createProxyMiddleware({
     target: 'https://claude.ai',
     changeOrigin: true,
-    ws: true, // 클로드의 실시간 채팅 답변(WebSockets) 지원을 위해 추가
-    cookieDomainRewrite: "", // 로그인 세션 쿠키가 현재 도메인에서 작동하도록 재작성
+    // 아래 옵션들을 추가해야 리다이렉션을 방지할 수 있습니다.
+    autoRewrite: true,      // 응답 헤더의 호스트네임을 프록시 호스트로 자동 재작성
+    followRedirects: true,  // 프록시 서버가 직접 리다이렉션을 따라가서 결과를 반환
+    cookieDomainRewrite: "", // 쿠키 도메인 문제로 인한 리다이렉션 방지
     onProxyRes: function (proxyRes, req, res) {
-        // CORS 문제 방지를 위해 응답 헤더 추가
+        // 원래 사이트로 튕겨나가는 것을 방지하기 위해 Location 헤더 조작 가능
+        if (proxyRes.headers['location']) {
+            console.log('Redirect detected:', proxyRes.headers['location']);
+        }
         proxyRes.headers['Access-Control-Allow-Origin'] = '*';
     }
 }));
