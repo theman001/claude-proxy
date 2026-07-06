@@ -248,6 +248,33 @@ app.use((req, res, next) => {
     return res.redirect(307, '/__simple' + req.url);
 });
 
+const simpleModeProxy = createProxyMiddleware({
+    router: () => simpleModeTarget,
+    changeOrigin: true,
+    autoRewrite: true,
+    followRedirects: true,
+    cookieDomainRewrite: '',
+    // Deliberately no `ws: true` here - that makes http-proxy-middleware
+    // auto-subscribe to the server's 'upgrade' event on its own, which with
+    // two proxy instances (this one and smartModeProxy) both racing to
+    // handle every upgrade would crash. We call .upgrade() ourselves below
+    // (see server.on('upgrade', ...)), which only works when it hasn't
+    // auto-subscribed.
+    // http-proxy-middleware forwards req.originalUrl (mount prefix and
+    // all) unless told otherwise, so the "/__simple" mount prefix has to
+    // be stripped explicitly here.
+    pathRewrite: { '^/__simple': '' },
+    onProxyRes: (proxyRes) => {
+        if (proxyRes.headers['location']) {
+            console.log('Redirect detected:', proxyRes.headers['location']);
+        }
+        proxyRes.headers['access-control-allow-origin'] = '*';
+    },
+    onError: (err, _req, res) => {
+        res.status(502).send(`Bad gateway: ${err.message}`);
+    },
+});
+
 app.use(
     '/__simple',
     (_req, res, next) => {
@@ -256,26 +283,7 @@ app.use(
         }
         next();
     },
-    createProxyMiddleware({
-        router: () => simpleModeTarget,
-        changeOrigin: true,
-        autoRewrite: true,
-        followRedirects: true,
-        cookieDomainRewrite: '',
-        // http-proxy-middleware forwards req.originalUrl (mount prefix and
-        // all) unless told otherwise, so the "/__simple" mount prefix has to
-        // be stripped explicitly here.
-        pathRewrite: { '^/__simple': '' },
-        onProxyRes: (proxyRes) => {
-            if (proxyRes.headers['location']) {
-                console.log('Redirect detected:', proxyRes.headers['location']);
-            }
-            proxyRes.headers['access-control-allow-origin'] = '*';
-        },
-        onError: (err, _req, res) => {
-            res.status(502).send(`Bad gateway: ${err.message}`);
-        },
-    }),
+    simpleModeProxy,
 );
 
 app.use((req, res, next) => {
@@ -324,9 +332,11 @@ app.use(async (req, res, next) => {
     }
 });
 
-app.use(createProxyMiddleware({
+const smartModeProxy = createProxyMiddleware({
     changeOrigin: true,
     followRedirects: false,
+    // See the comment on simpleModeProxy - no `ws: true` here either, for
+    // the same reason.
     router: (req) => req.proxyTarget.origin,
     pathRewrite: (_path, req) => req.proxyTarget.pathname + req.proxyTarget.search,
     onProxyRes: (proxyRes, req) => {
@@ -349,8 +359,41 @@ app.use(createProxyMiddleware({
     onError: (err, req, res) => {
         res.status(502).send(`Bad gateway: ${err.message}`);
     },
-}));
+});
+app.use(smartModeProxy);
 
-app.listen(3000, () => {
+const server = app.listen(3000, () => {
     console.log('Proxy server is running on http://localhost:3000');
+});
+
+// WebSocket upgrade requests hit the raw http.Server directly, bypassing
+// Express's middleware stack entirely - so the routing logic (and the SSRF
+// guard) above never runs for them. Re-derive the target here using the
+// same rules, re-check it, before handing off to the owning proxy instance.
+server.on('upgrade', async (req, socket, head) => {
+    // simpleModeTarget was already vetted when it was set via /__mode.
+    if (req.url.startsWith('/__simple')) {
+        if (!simpleModeTarget) return socket.destroy();
+        return simpleModeProxy.upgrade(req, socket, head);
+    }
+    if (simpleModeTarget && !req.url.startsWith('/__mode') && !parseExplicitTarget(req.url)) {
+        // Same "everything ambiguous belongs to the one fixed target" rule as
+        // the regular-request middleware, minus the redirect (a 307 isn't
+        // meaningful mid-handshake) - proxy straight to /__simple's target.
+        req.url = '/__simple' + req.url;
+        return simpleModeProxy.upgrade(req, socket, head);
+    }
+
+    const target =
+        parseExplicitTarget(req.url) ||
+        (isSameOriginReferer(req.headers.referer, req) && parseTargetFromReferer(req.headers.referer, req.url)) ||
+        parseTargetFromCookie(req);
+    if (!target) return socket.destroy();
+    try {
+        await assertPublicTarget(target);
+    } catch {
+        return socket.destroy();
+    }
+    req.proxyTarget = target;
+    smartModeProxy.upgrade(req, socket, head);
 });
