@@ -112,7 +112,6 @@
         const reloadBtn = document.getElementById('reload');
         const goBtn = document.getElementById('go');
         const simpleModeCheckbox = document.getElementById('simpleMode');
-        let simpleModeOrigin = null;
 
         function ensureScheme(input) {
             return /^https?:\/\//i.test(input) ? input : `https://${input}`;
@@ -130,10 +129,14 @@
             const target = ensureScheme(trimmed.replace(/^\/+/, ''));
 
             if (simpleModeCheckbox.checked) {
-                // Simple mode: one fixed target, proxied as-is (like the very
-                // first version of this proxy) - tell the server which origin
-                // before pointing the iframe at the dedicated passthrough path,
-                // keeping whatever path/query the user typed after the domain.
+                // Simple mode means "behave exactly like the original,
+                // iframe-less proxy" - some sites (claude.ai included) detect
+                // that they're being framed (Sec-Fetch-Dest: iframe, or their
+                // own window.top !== window.self check) and refuse to render
+                // normally. Navigating the iframe can't fix that; the only
+                // way to truly match the original behavior is to leave the
+                // shell entirely and move the whole tab to the passthrough
+                // path, the same way the original single-target proxy worked.
                 const parsed = new URL(target);
                 let res;
                 try {
@@ -146,8 +149,7 @@
                     alert(await res.text());
                     return;
                 }
-                simpleModeOrigin = parsed.origin;
-                view.contentWindow.location.href = '/__simple' + parsed.pathname + parsed.search + parsed.hash;
+                window.top.location.href = '/__simple' + parsed.pathname + parsed.search + parsed.hash;
                 return;
             }
 
@@ -162,10 +164,6 @@
         function toDisplayUrl(href) {
             try {
                 const u = new URL(href);
-                if (u.pathname === '/__simple' || u.pathname.startsWith('/__simple/')) {
-                    const rest = u.pathname.slice('/__simple'.length) || '/';
-                    return (simpleModeOrigin || '') + rest + u.search + u.hash;
-                }
                 return (u.pathname + u.search + u.hash).replace(/^\/+/, '');
             } catch {
                 return href;
