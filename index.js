@@ -257,11 +257,18 @@ const simpleModeProxy = createProxyMiddleware({
     },
 });
 
-// While simple mode is engaged, it owns every path at the root - exactly
-// like the original proxy, which had nothing else registered at all.
+// Always reachable regardless of simple-mode state, so there's a way back
+// to the toolbar/address-bar UI once simple mode has taken over "/".
+app.get('/__shell', (_req, res) => {
+    res.sendFile(path.join(__dirname, 'shell.html'));
+});
+
+// While simple mode is engaged, it owns every other path at the root -
+// exactly like the original proxy, which had nothing else registered at all.
 app.use((req, res, next) => {
     if (!simpleModeTarget) return next();
     if (req.url === '/__mode' || req.url.startsWith('/__mode?')) return next();
+    if (req.url === '/__shell') return next();
     return simpleModeProxy(req, res, next);
 });
 
@@ -362,7 +369,7 @@ server.on('upgrade', async (req, socket, head) => {
     // simpleModeTarget was already vetted when it was set via /__mode. It
     // owns every path (mirroring the regular-request middleware above), so
     // check it first.
-    if (simpleModeTarget && req.url !== '/__mode' && !req.url.startsWith('/__mode?')) {
+    if (simpleModeTarget && req.url !== '/__mode' && !req.url.startsWith('/__mode?') && req.url !== '/__shell') {
         return simpleModeProxy.upgrade(req, socket, head);
     }
 
