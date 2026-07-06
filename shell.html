@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Web Proxy</title>
+<style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        font-family: system-ui, sans-serif;
+    }
+    #toolbar {
+        display: flex;
+        align-items: stretch;
+        height: 40px;
+        gap: 6px;
+        padding: 6px;
+        box-sizing: border-box;
+        background: #f1f3f4;
+        border-bottom: 1px solid #d0d0d0;
+    }
+    #toolbar > * {
+        height: 100%;
+        box-sizing: border-box;
+        font-size: 14px;
+    }
+    .icon-btn {
+        flex: 0 0 auto;
+        width: 36px;
+        border: 1px solid #c9c9c9;
+        border-radius: 6px;
+        background: #fff;
+        cursor: pointer;
+        font-size: 16px;
+        line-height: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .icon-btn:disabled {
+        opacity: 0.4;
+        cursor: default;
+    }
+    .icon-btn:not(:disabled):hover {
+        background: #e8e8e8;
+    }
+    #urlbar {
+        flex: 1 1 auto;
+        min-width: 0;
+        border: 1px solid #c9c9c9;
+        border-radius: 6px;
+        padding: 0 10px;
+    }
+    #go {
+        flex: 0 0 auto;
+        border: 1px solid #c9c9c9;
+        border-radius: 6px;
+        background: #fff;
+        cursor: pointer;
+        padding: 0 18px;
+        white-space: nowrap;
+    }
+    #go:hover {
+        background: #e8e8e8;
+    }
+    .toggle {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 10px;
+        border: 1px solid #c9c9c9;
+        border-radius: 6px;
+        background: #fff;
+        cursor: pointer;
+        white-space: nowrap;
+        user-select: none;
+    }
+    .toggle:hover {
+        background: #e8e8e8;
+    }
+    .toggle input {
+        cursor: pointer;
+    }
+    #view {
+        display: block;
+        width: 100%;
+        height: calc(100% - 52px);
+        border: none;
+    }
+</style>
+</head>
+<body>
+    <div id="toolbar">
+        <button id="back" class="icon-btn" title="뒤로가기">&#8592;</button>
+        <button id="forward" class="icon-btn" title="앞으로가기">&#8594;</button>
+        <button id="reload" class="icon-btn" title="새로고침">&#8635;</button>
+        <input id="urlbar" type="text" placeholder="example.com 또는 https://example.com" autocomplete="off" spellcheck="false">
+        <label class="toggle" title="단순 모드: 대상 사이트 하나만 원본 그대로(리다이렉트 서버단 추적, 경로/쿠키 재작성 없음) 프록시합니다">
+            <input type="checkbox" id="simpleMode">
+            <span>단순모드</span>
+        </label>
+        <button id="go">접속</button>
+    </div>
+    <iframe id="view" name="view"></iframe>
+    <script>
+        const view = document.getElementById('view');
+        const urlbar = document.getElementById('urlbar');
+        const backBtn = document.getElementById('back');
+        const forwardBtn = document.getElementById('forward');
+        const reloadBtn = document.getElementById('reload');
+        const goBtn = document.getElementById('go');
+        const simpleModeCheckbox = document.getElementById('simpleMode');
+        let simpleModeOrigin = null;
+
+        function ensureScheme(input) {
+            return /^https?:\/\//i.test(input) ? input : `https://${input}`;
+        }
+
+        simpleModeCheckbox.addEventListener('change', () => {
+            if (!simpleModeCheckbox.checked) {
+                fetch('/__mode?mode=smart').catch(() => { /* best effort */ });
+            }
+        });
+
+        async function navigate(input) {
+            const trimmed = input.trim();
+            if (!trimmed) return;
+            const target = ensureScheme(trimmed.replace(/^\/+/, ''));
+
+            if (simpleModeCheckbox.checked) {
+                // Simple mode: one fixed target, proxied as-is (like the very
+                // first version of this proxy) - tell the server which origin
+                // before pointing the iframe at the dedicated passthrough path,
+                // keeping whatever path/query the user typed after the domain.
+                const parsed = new URL(target);
+                let res;
+                try {
+                    res = await fetch('/__mode?mode=simple&target=' + encodeURIComponent(parsed.origin));
+                } catch {
+                    alert('서버에 연결할 수 없습니다.');
+                    return;
+                }
+                if (!res.ok) {
+                    alert(await res.text());
+                    return;
+                }
+                simpleModeOrigin = parsed.origin;
+                view.contentWindow.location.href = '/__simple' + parsed.pathname + parsed.search + parsed.hash;
+                return;
+            }
+
+            // Always send an explicit scheme: this is the signal the server uses
+            // to tell "user typed a new address" apart from "the loaded page's
+            // own link/asset/redirect request" - without it, a bare address
+            // could get misresolved against whatever site the session was
+            // previously on.
+            view.contentWindow.location.href = '/' + target;
+        }
+
+        function toDisplayUrl(href) {
+            try {
+                const u = new URL(href);
+                if (u.pathname === '/__simple' || u.pathname.startsWith('/__simple/')) {
+                    const rest = u.pathname.slice('/__simple'.length) || '/';
+                    return (simpleModeOrigin || '') + rest + u.search + u.hash;
+                }
+                return (u.pathname + u.search + u.hash).replace(/^\/+/, '');
+            } catch {
+                return href;
+            }
+        }
+
+        function syncUrlbar() {
+            try {
+                urlbar.value = toDisplayUrl(view.contentWindow.location.href);
+            } catch {
+                // cross-origin (shouldn't normally happen through this proxy) - leave as-is
+            }
+        }
+
+        view.addEventListener('load', syncUrlbar);
+
+        goBtn.addEventListener('click', () => navigate(urlbar.value));
+        urlbar.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') navigate(urlbar.value);
+        });
+        backBtn.addEventListener('click', () => {
+            try { view.contentWindow.history.back(); } catch { /* no-op */ }
+            // Back/forward can be served from bfcache, which doesn't always
+            // fire the iframe's 'load' event - poll shortly after instead of
+            // relying on it alone, otherwise the address bar shows the
+            // previous page's URL.
+            setTimeout(syncUrlbar, 300);
+        });
+        forwardBtn.addEventListener('click', () => {
+            try { view.contentWindow.history.forward(); } catch { /* no-op */ }
+            setTimeout(syncUrlbar, 300);
+        });
+        reloadBtn.addEventListener('click', () => {
+            try { view.contentWindow.location.reload(); } catch { /* no-op */ }
+        });
+    </script>
+</body>
+</html>
